@@ -10,8 +10,11 @@ use strict;
 use base qw(Slim::Formats);
 
 use Audio::Scan;
+use Data::Dumper;
 
 use Slim::Formats::MP3;
+use Slim::Formats::Playlists::CUE;
+use Slim::Music::Info;
 use Slim::Utils::Log;
 use Slim::Utils::SoundCheck;
 
@@ -43,13 +46,17 @@ my %tagMapping = (
 );
 
 sub getTag {
-	my $class = shift;
-	my $file  = shift || return {};
+	my $class  = shift;
+	my $file   = shift || return {};
+	my $anchor = shift || "";
 
 	my $s = Audio::Scan->scan( $file );
 
 	my $info = $s->{info};
 	my $tags = $s->{tags};
+
+	# FIXME how is this supposed to get turned into a file URL?
+	my $base_fileurl = Slim::Utils::Misc::fileURLFromPath($file);
 
 	return unless $info->{song_length_ms};
 
@@ -106,6 +113,91 @@ sub getTag {
 			Slim::Formats::MP3->doTagMapping($tags);
 		}
 	}
+
+	#FIXME this is normally done higher up in readTags; not sure the best way to handle this
+	if (!defined $tags->{CONTENT_TYPE}) {
+		$tags->{CONTENT_TYPE} = 'mp4x';
+	} elsif ($tags->{CONTENT_TYPE} eq 'alc') {
+		$tags->{CONTENT_TYPE} = 'alcx';
+	}
+
+	# Return if no chapters found
+	if ( !exists $info->{chpl} ) {
+		return $tags;
+	}
+
+	$tags->{FILENAME} = $base_fileurl;
+
+	my $chapters = $info->{chpl};
+	my $chapter_count = scalar @$chapters;
+	my $tracks = [];
+	for (my $i = 0; $i < $chapter_count; $i++) {
+		my $track = {};
+		push @$tracks, $track;
+
+		# Merge in file-level values
+		for my $tag (keys %$tags) {
+			$track->{$tag} = $tags->{$tag};
+		}
+
+		$track->{AUDIO} = 1;
+		$track->{TRACKNUM} = $i + 1;
+		$track->{TITLE} = $chapters->[$i]->{name};
+		$track->{START} = $chapters->[$i]->{timestamp} / 10000000;
+		if ($i < $chapter_count - 1) {
+			$track->{END} = $chapters->[$i + 1]->{timestamp} / 10000000;
+		} else {
+			$track->{END} = $info->{song_length_ms} / 1000;
+		}
+
+		$track->{URI} = "$base_fileurl#".$track->{START}."-".$track->{END};
+	}
+
+	# Fail if chapter list data is invalid
+	if ( !scalar @$tracks ) {
+		return $tags;
+	}
+
+	# set fields appropriate for a playlist
+	# FIXME fec means flac with embedded cuesheet; what should we really use here? "cur"?
+	$tags->{CT}    = "fec";
+	$tags->{AUDIO} = 0;
+
+	my $fileurl = $base_fileurl . "#$anchor";
+	my $fileage = (stat($file))[9];
+	my $rs      = Slim::Schema->rs('Track');
+
+	# Do the actual data store
+	for my $track ( @$tracks ) {
+
+		# Allow files with chapter lists to have a date and size
+		$track->{AGE} = $fileage;
+		$track->{FS}  = $tags->{SIZE};
+
+		# Mark track as virtual
+		$track->{VIRTUAL} = 1;
+
+		next unless exists $track->{URI};
+
+		Slim::Formats::Playlists::CUE->processAnchor($track);
+
+		$rs->updateOrCreate( {
+			url        => $track->{URI},
+			attributes => $track,
+			readTags   => 0,  # avoid the loop, don't read tags
+		} );
+
+		# if we were passed in an anchor, then the caller is expecting back tags for
+		# the single track indicated.
+		if ( $anchor && $track->{URI} eq $fileurl ) {
+			$tags = $track;
+
+			main::DEBUGLOG && logger('formats.playlists')->debug("    found tags for $file\#$anchor");
+		}
+	}
+
+	#FIXME
+	#main::DEBUGLOG && logger('formats.playlists')->debug("    returning $items items");
 
 	return $tags;
 }
@@ -266,7 +358,7 @@ sub parseStream {
 	$args->{_scanbuf} = substr($args->{_scanbuf}, 0, $args->{_offset} + ($args->{_atom} eq 'moov' ? $args->{_need} : 0));
 	
 	# put at least 16 bytes after mdat or it confuses audio::scan (and header creation)
-	my $fh = File::Temp->new( DIR => Slim::Utils::Misc::getTempDir);
+	my $fh = File::Temp->new();
 	$fh->write($args->{_scanbuf} . pack('N', $args->{_audio_size}) . 'mdat' . ' ' x 16);
 	$fh->seek(0, 0);
 
