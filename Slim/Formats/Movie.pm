@@ -55,8 +55,7 @@ sub getTag {
 	my $info = $s->{info};
 	my $tags = $s->{tags};
 
-	# FIXME how is this supposed to get turned into a file URL?
-	my $base_fileurl = Slim::Utils::Misc::fileURLFromPath($file);
+	my $url = Slim::Utils::Misc::fileURLFromPath($file);
 
 	return unless $info->{song_length_ms};
 
@@ -126,7 +125,8 @@ sub getTag {
 		return $tags;
 	}
 
-	$tags->{FILENAME} = $base_fileurl;
+	$tags->{FILENAME} = $url;
+	#$tags->{FILENAME} = $file;
 
 	my $chapters = $info->{chpl};
 	my $chapter_count = scalar @$chapters;
@@ -150,7 +150,7 @@ sub getTag {
 			$track->{END} = $info->{song_length_ms} / 1000;
 		}
 
-		$track->{URI} = "$base_fileurl#".$track->{START}."-".$track->{END};
+		$track->{URI} = $url.'#'.$track->{START}.'-'.$track->{END};
 	}
 
 	# Fail if chapter list data is invalid
@@ -163,9 +163,10 @@ sub getTag {
 	$tags->{CT}    = "fec";
 	$tags->{AUDIO} = 0;
 
-	my $fileurl = $base_fileurl . "#$anchor";
+	my $fileurl = $url . "#$anchor";
 	my $fileage = (stat($file))[9];
 	my $rs      = Slim::Schema->rs('Track');
+	my $items   = scalar(@$tracks);
 
 	# Do the actual data store
 	for my $track ( @$tracks ) {
@@ -196,8 +197,7 @@ sub getTag {
 		}
 	}
 
-	#FIXME
-	#main::DEBUGLOG && logger('formats.playlists')->debug("    returning $items items");
+	main::DEBUGLOG && logger('formats.playlists')->debug("    returning $items items");
 
 	return $tags;
 }
